@@ -12,7 +12,16 @@ type Posting struct {
 	URL      string `json:"url"`
 }
 
-// Key returns the posting's identity as a single string.
-func (p Posting) Key() string {
-	return p.Source + "/" + p.Company + "/" + p.JobID
+// Key is a posting's identity. It is a struct rather than a joined string so
+// that two different postings can never produce the same key, whatever
+// characters their fields contain. It is comparable and can be a map key.
+type Key struct {
+	Source  string
+	Company string
+	JobID   string
+}
+
+// Key returns the posting's identity.
+func (p Posting) Key() Key {
+	return Key{Source: p.Source, Company: p.Company, JobID: p.JobID}
 }

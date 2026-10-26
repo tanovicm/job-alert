@@ -12,12 +12,12 @@ import (
 // until the PostgreSQL store exists.
 type Memory struct {
 	mu       sync.Mutex
-	postings map[string]domain.Posting
-	order    []string // keys in the order first saved, so List is stable
+	postings map[domain.Key]domain.Posting
+	order    []domain.Key // keys in the order first saved, so List is stable
 }
 
 func NewMemory() *Memory {
-	return &Memory{postings: make(map[string]domain.Posting)}
+	return &Memory{postings: make(map[domain.Key]domain.Posting)}
 }
 
 // Save stores postings and returns only the ones that were not stored before.
