@@ -30,12 +30,26 @@ func (f *fakeSource) Fetch(_ context.Context, company string) ([]domain.Posting,
 	return f.postings[company], nil
 }
 
+// matchAll lets every posting through.
+type matchAll struct{}
+
+func (matchAll) Match(domain.Posting) bool { return true }
+
+// matchTitles lets through only postings with one of the given titles.
+type matchTitles map[string]bool
+
+func (m matchTitles) Match(p domain.Posting) bool { return m[p.Title] }
+
 func newService(src *fakeSource, store Store, companies ...string) *Service {
+	return newFilteredService(src, store, matchAll{}, companies...)
+}
+
+func newFilteredService(src *fakeSource, store Store, filter Filter, companies ...string) *Service {
 	var boards []Board
 	for _, c := range companies {
 		boards = append(boards, Board{Source: src, Company: c})
 	}
-	return New(boards, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(boards, store, filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func posting(company, id, title string) domain.Posting {
@@ -72,6 +86,30 @@ func TestRunStoresPostingsWithoutDuplicates(t *testing.T) {
 	}
 	if got[0].Title != "Senior Go Engineer" {
 		t.Errorf("edit not stored: title = %q", got[0].Title)
+	}
+}
+
+func TestRunStoresOnlyRelevantPostings(t *testing.T) {
+	ctx := context.Background()
+	src := &fakeSource{postings: map[string][]domain.Posting{
+		"acme": {
+			posting("acme", "1", "Go Engineer"),
+			posting("acme", "2", "Account Executive"),
+			posting("acme", "3", "Backend Engineer"),
+		},
+	}}
+	filter := matchTitles{"Go Engineer": true, "Backend Engineer": true}
+	svc := newFilteredService(src, storage.NewMemory(), filter, "acme")
+
+	if err := svc.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.ListPostings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].JobID != "1" || got[1].JobID != "3" {
+		t.Fatalf("stored %+v, want only jobs 1 and 3", got)
 	}
 }
 

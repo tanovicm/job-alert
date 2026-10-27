@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"job-alert/internal/filter"
 	"job-alert/internal/handler"
 	"job-alert/internal/service"
 	"job-alert/internal/source"
@@ -18,7 +19,19 @@ import (
 )
 
 // greenhouseBoards is the list of companies to check until config exists.
-var greenhouseBoards = []string{"cloudflare", "stripe"}
+var greenhouseBoards = []string{
+	"cloudflare", "stripe", "datadog", "gitlab", "twilio",
+	"elastic", "mongodb", "grafanalabs", "cockroachlabs", "dropbox",
+	"databricks", "pagerduty", "vercel", "figma", "discord",
+	"reddit", "coinbase", "samsara", "fivetran", "planetscale",
+}
+
+// rules are the relevance rules until config exists.
+var rules = filter.Rules{
+	Include:   []string{"Go", "Golang", "Backend", "Platform"},
+	Exclude:   []string{"Frontend", "Intern", "Marketing", "Designer"},
+	Locations: []string{"Remote", "Belgrade"},
+}
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -32,7 +45,7 @@ func main() {
 		boards = append(boards, service.Board{Source: gh, Company: company})
 	}
 
-	svc := service.New(boards, storage.NewMemory(), log)
+	svc := service.New(boards, storage.NewMemory(), filter.New(rules), log)
 
 	srv := &http.Server{
 		Addr:              ":8080",

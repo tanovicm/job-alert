@@ -22,6 +22,11 @@ type Store interface {
 	List(ctx context.Context) ([]domain.Posting, error)
 }
 
+// Filter decides whether a posting is relevant.
+type Filter interface {
+	Match(p domain.Posting) bool
+}
+
 // Board is one company on one job board.
 type Board struct {
 	Source  source.Source
@@ -32,12 +37,13 @@ type Board struct {
 type Service struct {
 	boards  []Board
 	store   Store
+	filter  Filter
 	log     *slog.Logger
 	running atomic.Bool
 }
 
-func New(boards []Board, store Store, log *slog.Logger) *Service {
-	return &Service{boards: boards, store: store, log: log}
+func New(boards []Board, store Store, filter Filter, log *slog.Logger) *Service {
+	return &Service{boards: boards, store: store, filter: filter, log: log}
 }
 
 // StartRun starts a run in the background and returns immediately.
@@ -64,8 +70,8 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// check fetches and stores postings for every board. A failing board is
-// logged and skipped so the others still get checked.
+// check fetches postings for every board and stores the relevant ones.
+// A failing board is logged and skipped so the others still get checked.
 func (s *Service) check(ctx context.Context) {
 	for _, b := range s.boards {
 		postings, err := b.Source.Fetch(ctx, b.Company)
@@ -73,13 +79,21 @@ func (s *Service) check(ctx context.Context) {
 			s.log.Error("fetch failed", "source", b.Source.Name(), "company", b.Company, "err", err)
 			continue
 		}
-		fresh, err := s.store.Save(ctx, postings)
+
+		var relevant []domain.Posting
+		for _, p := range postings {
+			if s.filter.Match(p) {
+				relevant = append(relevant, p)
+			}
+		}
+
+		fresh, err := s.store.Save(ctx, relevant)
 		if err != nil {
 			s.log.Error("save failed", "source", b.Source.Name(), "company", b.Company, "err", err)
 			continue
 		}
 		s.log.Info("board checked", "source", b.Source.Name(), "company", b.Company,
-			"fetched", len(postings), "new", len(fresh))
+			"fetched", len(postings), "relevant", len(relevant), "new", len(fresh))
 	}
 }
 
