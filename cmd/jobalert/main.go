@@ -14,6 +14,7 @@ import (
 
 	"job-alert/internal/filter"
 	"job-alert/internal/handler"
+	"job-alert/internal/scheduler"
 	"job-alert/internal/service"
 	"job-alert/internal/source"
 	"job-alert/internal/storage"
@@ -29,6 +30,9 @@ var greenhouseBoards = []string{
 
 // defaultDatabaseURL is used when DATABASE_URL is not set.
 const defaultDatabaseURL = "postgres://jobalert:jobalert@localhost:5432/jobalert?sslmode=disable"
+
+// defaultScheduleInterval is used when SCHEDULE_INTERVAL is not set.
+const defaultScheduleInterval = 24 * time.Hour
 
 // rules are the relevance rules until config exists.
 var rules = filter.Rules{
@@ -54,6 +58,11 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	interval, err := scheduleInterval()
+	if err != nil {
+		return err
+	}
+
 	gh := source.NewGreenhouse()
 	var boards []service.Board
 	for _, company := range greenhouseBoards {
@@ -73,6 +82,9 @@ func run(log *slog.Logger) error {
 
 	svc := service.New(boards, store, filter.New(rules), log)
 
+	// Stops when ctx is cancelled, together with the HTTP server.
+	go scheduler.Run(ctx, svc, interval, log)
+
 	srv := &http.Server{
 		Addr:              ":8080",
 		Handler:           handler.New(ctx, svc, log),
@@ -91,4 +103,18 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("serve http: %w", err)
 	}
 	return nil
+}
+
+// scheduleInterval reads SCHEDULE_INTERVAL as a Go duration such as "24h" or
+// "30m", falling back to defaultScheduleInterval when it is not set.
+func scheduleInterval() (time.Duration, error) {
+	v := os.Getenv("SCHEDULE_INTERVAL")
+	if v == "" {
+		return defaultScheduleInterval, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("SCHEDULE_INTERVAL must be a positive duration like 24h, got %q", v)
+	}
+	return d, nil
 }
