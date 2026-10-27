@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,8 +27,8 @@ var greenhouseBoards = []string{
 	"reddit", "coinbase", "samsara", "fivetran", "planetscale",
 }
 
-// databaseURL is hardcoded until config exists.
-const databaseURL = "postgres://jobalert:jobalert@localhost:5432jobalert?sslmode=disable"
+// defaultDatabaseURL is used when DATABASE_URL is not set.
+const defaultDatabaseURL = "postgres://jobalert:jobalert@localhost:5432/jobalert?sslmode=disable"
 
 // rules are the relevance rules until config exists.
 var rules = filter.Rules{
@@ -39,6 +40,17 @@ var rules = filter.Rules{
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// The only exit point. run has returned, so its deferred cleanup has
+	// already happened; a non-zero code tells the orchestrator we failed.
+	if err := run(log); err != nil {
+		log.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run wires the service together and serves HTTP until the process receives
+// SIGINT or SIGTERM, which is a clean shutdown and returns nil.
+func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -48,10 +60,14 @@ func main() {
 		boards = append(boards, service.Board{Source: gh, Company: company})
 	}
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = defaultDatabaseURL
+	}
+
 	store, err := storage.NewPostgres(databaseURL)
 	if err != nil {
-		log.Error("open database", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer store.Close()
 
@@ -72,7 +88,7 @@ func main() {
 
 	log.Info("listening", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		log.Error("server failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("serve http: %w", err)
 	}
+	return nil
 }
