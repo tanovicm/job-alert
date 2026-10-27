@@ -26,6 +26,9 @@ var greenhouseBoards = []string{
 	"reddit", "coinbase", "samsara", "fivetran", "planetscale",
 }
 
+// databaseURL is hardcoded until config exists.
+const databaseURL = "postgres://jobalert:jobalert@localhost:5432jobalert?sslmode=disable"
+
 // rules are the relevance rules until config exists.
 var rules = filter.Rules{
 	Include:   []string{"Go", "Golang", "Backend", "Platform"},
@@ -45,7 +48,14 @@ func main() {
 		boards = append(boards, service.Board{Source: gh, Company: company})
 	}
 
-	svc := service.New(boards, storage.NewMemory(), filter.New(rules), log)
+	store, err := storage.NewPostgres(databaseURL)
+	if err != nil {
+		log.Error("open database", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	svc := service.New(boards, store, filter.New(rules), log)
 
 	srv := &http.Server{
 		Addr:              ":8080",
