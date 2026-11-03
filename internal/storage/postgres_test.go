@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"job-alert/internal/domain"
@@ -101,6 +103,38 @@ func TestPostgresListFirstSeenOrder(t *testing.T) {
 	got := pgList(t, p)
 	if len(got) != 2 || got[0].JobID != "2" || got[1].JobID != "1" {
 		t.Fatalf("list = %+v, want jobs 2 then 1", got)
+	}
+}
+
+func TestPostgresConcurrentSave(t *testing.T) {
+	p := openTestPostgres(t)
+
+	// Like the service: several boards saving at once, each its own company.
+	const n = 10
+	var wg sync.WaitGroup
+	newCounts := make([]int, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ps := domain.Posting{Source: "greenhouse", Company: fmt.Sprintf("company-%d", i), JobID: "1", Title: "Go Engineer"}
+			fresh, err := p.Save(context.Background(), []domain.Posting{ps})
+			newCounts[i], errs[i] = len(fresh), err
+		}()
+	}
+	wg.Wait()
+
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("save %d: %v", i, errs[i])
+		}
+		if newCounts[i] != 1 {
+			t.Errorf("save %d: %d new, want 1", i, newCounts[i])
+		}
+	}
+	if got := pgList(t, p); len(got) != n {
+		t.Fatalf("stored %d postings, want %d", len(got), n)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"job-alert/internal/domain"
@@ -35,15 +36,21 @@ type Board struct {
 
 // Service checks boards and stores what it finds. Only one run executes at a time.
 type Service struct {
-	boards  []Board
-	store   Store
-	filter  Filter
-	log     *slog.Logger
-	running atomic.Bool
+	boards      []Board
+	store       Store
+	filter      Filter
+	concurrency int // boards checked at the same time
+	log         *slog.Logger
+	running     atomic.Bool
 }
 
-func New(boards []Board, store Store, filter Filter, log *slog.Logger) *Service {
-	return &Service{boards: boards, store: store, filter: filter, log: log}
+// New returns a Service that checks up to concurrency boards at the same time.
+// The store must be safe for concurrent use.
+func New(boards []Board, store Store, filter Filter, concurrency int, log *slog.Logger) *Service {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return &Service{boards: boards, store: store, filter: filter, concurrency: concurrency, log: log}
 }
 
 // StartRun starts a run in the background and returns immediately.
@@ -70,31 +77,56 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// check fetches postings for every board and stores the relevant ones.
-// A failing board is logged and skipped so the others still get checked.
+// check checks every board, at most s.concurrency at a time, and returns only
+// once all of them are done. Boards are independent: a failing board is logged
+// and does not cancel the others. When ctx is cancelled no new boards start,
+// and the ones in flight see the cancelled context and return.
 func (s *Service) check(ctx context.Context) {
+	sem := make(chan struct{}, s.concurrency)
+	var wg sync.WaitGroup
+
 	for _, b := range s.boards {
-		postings, err := b.Source.Fetch(ctx, b.Company)
-		if err != nil {
-			s.log.Error("fetch failed", "source", b.Source.Name(), "company", b.Company, "err", err)
-			continue
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
 		}
-
-		var relevant []domain.Posting
-		for _, p := range postings {
-			if s.filter.Match(p) {
-				relevant = append(relevant, p)
-			}
+		// If both cases were ready, select may have picked the free slot;
+		// check again so no board starts after cancellation.
+		if ctx.Err() != nil {
+			break
 		}
-
-		fresh, err := s.store.Save(ctx, relevant)
-		if err != nil {
-			s.log.Error("save failed", "source", b.Source.Name(), "company", b.Company, "err", err)
-			continue
-		}
-		s.log.Info("board checked", "source", b.Source.Name(), "company", b.Company,
-			"fetched", len(postings), "relevant", len(relevant), "new", len(fresh))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.checkBoard(ctx, b)
+		}()
 	}
+	wg.Wait()
+}
+
+// checkBoard fetches one board and stores its relevant postings.
+func (s *Service) checkBoard(ctx context.Context, b Board) {
+	postings, err := b.Source.Fetch(ctx, b.Company)
+	if err != nil {
+		s.log.Error("fetch failed", "source", b.Source.Name(), "company", b.Company, "err", err)
+		return
+	}
+
+	var relevant []domain.Posting
+	for _, p := range postings {
+		if s.filter.Match(p) {
+			relevant = append(relevant, p)
+		}
+	}
+
+	fresh, err := s.store.Save(ctx, relevant)
+	if err != nil {
+		s.log.Error("save failed", "source", b.Source.Name(), "company", b.Company, "err", err)
+		return
+	}
+	s.log.Info("board checked", "source", b.Source.Name(), "company", b.Company,
+		"fetched", len(postings), "relevant", len(relevant), "new", len(fresh))
 }
 
 // ListPostings returns the stored postings.

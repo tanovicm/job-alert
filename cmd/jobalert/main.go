@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -33,6 +34,9 @@ const defaultDatabaseURL = "postgres://jobalert:jobalert@localhost:5432/jobalert
 
 // defaultScheduleInterval is used when SCHEDULE_INTERVAL is not set.
 const defaultScheduleInterval = 24 * time.Hour
+
+// defaultConcurrency is used when CONCURRENCY is not set.
+const defaultConcurrency = 5
 
 // rules are the relevance rules until config exists.
 var rules = filter.Rules{
@@ -62,6 +66,10 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	workers, err := concurrency()
+	if err != nil {
+		return err
+	}
 
 	gh := source.NewGreenhouse()
 	var boards []service.Board
@@ -80,7 +88,7 @@ func run(log *slog.Logger) error {
 	}
 	defer store.Close()
 
-	svc := service.New(boards, store, filter.New(rules), log)
+	svc := service.New(boards, store, filter.New(rules), workers, log)
 
 	// Stops when ctx is cancelled, together with the HTTP server.
 	go scheduler.Run(ctx, svc, interval, log)
@@ -117,4 +125,18 @@ func scheduleInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("SCHEDULE_INTERVAL must be a positive duration like 24h, got %q", v)
 	}
 	return d, nil
+}
+
+// concurrency reads CONCURRENCY, the number of boards checked at the same
+// time, falling back to defaultConcurrency when it is not set.
+func concurrency() (int, error) {
+	v := os.Getenv("CONCURRENCY")
+	if v == "" {
+		return defaultConcurrency, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("CONCURRENCY must be a positive whole number, got %q", v)
+	}
+	return n, nil
 }

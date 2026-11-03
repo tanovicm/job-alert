@@ -3,11 +3,15 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"job-alert/internal/domain"
+	"job-alert/internal/source"
 	"job-alert/internal/storage"
 )
 
@@ -45,11 +49,119 @@ func newService(src *fakeSource, store Store, companies ...string) *Service {
 }
 
 func newFilteredService(src *fakeSource, store Store, filter Filter, companies ...string) *Service {
-	var boards []Board
+	return New(boards(src, companies...), store, filter, 5, discard)
+}
+
+var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+func boards(src source.Source, companies ...string) []Board {
+	var bs []Board
 	for _, c := range companies {
-		boards = append(boards, Board{Source: src, Company: c})
+		bs = append(bs, Board{Source: src, Company: c})
 	}
-	return New(boards, store, filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return bs
+}
+
+func companies(n int) []string {
+	var cs []string
+	for i := range n {
+		cs = append(cs, fmt.Sprintf("company-%d", i))
+	}
+	return cs
+}
+
+// trackingSource records how many Fetch calls run at the same time. Each call
+// takes delay, or until ctx is cancelled, so that calls overlap.
+type trackingSource struct {
+	delay time.Duration
+
+	inFlight atomic.Int32
+	maxSeen  atomic.Int32
+	started  atomic.Int32
+	finished atomic.Int32
+}
+
+func (s *trackingSource) Name() string { return "tracking" }
+
+func (s *trackingSource) Fetch(ctx context.Context, company string) ([]domain.Posting, error) {
+	s.started.Add(1)
+	defer s.finished.Add(1)
+
+	n := s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
+	for {
+		m := s.maxSeen.Load()
+		if n <= m || s.maxSeen.CompareAndSwap(m, n) {
+			break
+		}
+	}
+
+	select {
+	case <-time.After(s.delay):
+		return []domain.Posting{posting(company, "1", "Go Engineer")}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestRunLimitsConcurrency(t *testing.T) {
+	src := &trackingSource{delay: 20 * time.Millisecond}
+	svc := New(boards(src, companies(12)...), storage.NewMemory(), matchAll{}, 3, discard)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := src.maxSeen.Load(); got != 3 {
+		t.Errorf("at most %d boards ran at the same time, want exactly the limit of 3", got)
+	}
+	// Run must not return before every board is done.
+	if got := src.finished.Load(); got != 12 {
+		t.Errorf("%d of 12 boards finished when Run returned", got)
+	}
+}
+
+func TestRunWithConcurrencyOneIsSequential(t *testing.T) {
+	src := &trackingSource{delay: 5 * time.Millisecond}
+	svc := New(boards(src, companies(4)...), storage.NewMemory(), matchAll{}, 1, discard)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := src.maxSeen.Load(); got != 1 {
+		t.Errorf("%d boards ran at the same time, want 1", got)
+	}
+}
+
+func TestRunStopsStartingBoardsWhenCancelled(t *testing.T) {
+	src := &trackingSource{delay: time.Hour} // only cancellation ends a Fetch
+	svc := New(boards(src, companies(10)...), storage.NewMemory(), matchAll{}, 2, discard)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.Run(ctx)
+		close(done)
+	}()
+
+	// Wait until the first two boards are in flight, then cancel.
+	deadline := time.Now().Add(time.Second)
+	for src.inFlight.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+	if got := src.started.Load(); got != 2 {
+		t.Errorf("%d boards started, want only the 2 in flight before cancellation", got)
+	}
+	if got := src.inFlight.Load(); got != 0 {
+		t.Errorf("%d fetches still running after Run returned", got)
+	}
 }
 
 func posting(company, id, title string) domain.Posting {
